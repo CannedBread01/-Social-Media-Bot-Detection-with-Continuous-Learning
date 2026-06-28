@@ -14,7 +14,7 @@ class Caverlee11(IterableDataset):
     Dataset for the Cresci18. The downloaded *.csv.zip files can be in the directory /datasets
                               or in another dataset whose filepath needs to be given as param to the constructor.
     """
-    def __init__(self, mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None):
+    def __init__(self, mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None, label_mapping = ["bot","human"], sub_sample_size = -1):
         """
         :param root: OPTIONAL,root is the filepath of the dataset directory in which the dataset is stored.
                      Dataset directory is default directory.
@@ -22,12 +22,16 @@ class Caverlee11(IterableDataset):
         :param mode: Dataset split to use ("train", "dev", or "test").
         :param train_split: Fraction of users assigned to the training set (e.g. 0.8 = 80%).
         :param dev_split: Fraction of users assigned to the validation set (e.g. 0.1 = 10
+        :param label_mapping: List of labels to use for provided samples. Format: `['bot', 'human']`
+        :param sub_sample_size: (Default: -1) the upper limit of the amount samples the iterator should provide. Fewer samples are possible if the dataset doesn't have enough samples.
         """
          #__init__ does the filehandling
         if root is None:
             root = "datasets"
-        
+
+        self.sub_sample_size = sub_sample_size
         self.mode = mode
+        self.label_mapping = label_mapping
 
         assert train_split + dev_split < 1.0
 
@@ -83,8 +87,8 @@ class Caverlee11(IterableDataset):
     def __iter__(self):
 
         datasets = [
-            (self.polluters_data_path, self.polluters_tweets_data_path, "bot"),
-            (self.users_data_path, self.users_tweets_data_path, "human"),
+            (self.polluters_data_path, self.polluters_tweets_data_path, self.label_mapping[0]),
+            (self.users_data_path, self.users_tweets_data_path, self.label_mapping[1]),
         ]
 
         fieldnames_metadata = [
@@ -104,7 +108,7 @@ class Caverlee11(IterableDataset):
             "text",
             "Created_at",
         ]
-
+        iteration = -self.sub_sample_size
         for metadata_path, tweets_path, label in datasets:
 
             # --- loading metadata---
@@ -143,6 +147,10 @@ class Caverlee11(IterableDataset):
                                     user_data=UserData.from_row(users[current_user_id]),
                                     label=label,
                                 )
+                                # count and stop early if only a sub sample is requested
+                                if self.sub_sample_size > 0:
+                                    iteration += 1
+                                    if iteration >= 0: break
                             current_tweets = []
                             current_user_id = user_id
                             
@@ -160,6 +168,10 @@ class Caverlee11(IterableDataset):
                         user_data=UserData.from_row(users[current_user_id]),
                         label=label,
                     )
+                    # count and stop early if only a sub sample is requested
+                    if self.sub_sample_size > 0:
+                        iteration += 1
+                        if iteration >= 0: break
 if __name__ == "__main__":
     example = Caverlee11("train",0.8,0.1)
    

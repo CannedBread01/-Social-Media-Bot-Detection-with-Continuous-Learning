@@ -1,3 +1,4 @@
+
 from zipfile import ZipFile
 from torch.utils.data import IterableDataset
 import os
@@ -9,21 +10,22 @@ class Cresci17(IterableDataset):
     """
     Dataset for the Cresci-2017. The zipped dataset file should be named 'cresci-2017.csv.zip' and should be placed in the directory /datasets.
     """
-    def __init__(self,subset_type , mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None):
+    def __init__(self,subset_type , mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None, custom_label = None, sub_sample_size = -1):
         """
         :param root(OPTIONAL): the filepath of the dataset directory in which the dataset is stored, if none is given "datasets"
         :param mode: Dataset split to use ("train", "dev", or "test").
         :param train_split: Fraction of users assigned to the training set (e.g. 0.8 = 80%).
         :param dev_split: Fraction of users assigned to the validation set (e.g. 0.1 = 10
-
+        :param sub_sample_size: (Default: -1) the upper limit of the amount samples the iterator should provide. Fewer samples are possible if the dataset doesn't have enough samples.
         Should you want all Subsets, you need to call the constructor for all Cresci17SetTypes. 
         """
         #__init__ does the filehandling
         if root == None:
             root = "datasets"
 
+        self.sub_sample_size = sub_sample_size
         self.mode = mode
-
+        self.custom_label = custom_label
         assert train_split + dev_split < 1.0
 
         self.subset_type = subset_type
@@ -74,6 +76,9 @@ class Cresci17(IterableDataset):
                 zipObj.extractall(default_file_path)
                 zipObj.close()
 
+        # check if tweet data is available (only relevant for Traditional_spambots_2,3,4)
+        self.tweet_data_available = os.path.exists(self.tweet_data_path)
+
     def __iter__(self):
 
         users = {}
@@ -88,23 +93,24 @@ class Cresci17(IterableDataset):
                 users[row["id"]] = row
 
         tweets = defaultdict(list)
-        with open(self.tweet_data_path, newline="", encoding="latin-1") as f:
-            reader = csv.DictReader(f,  delimiter=",")
-            for row in reader:
-                    
-                user_id = row["user_id"]
+        if self.tweet_data_available:
+            with open(self.tweet_data_path, newline="", encoding="latin-1") as f:
+                reader = csv.DictReader(f,  delimiter=",")
+                for row in reader:
 
-                if user_id not in users:
-                    continue
-                
-                if not row or not row.get("text"):
-                    continue
+                    user_id = row["user_id"]
 
-                row["in_reply_to_screen_name"] = 0
+                    if user_id not in users:
+                        continue
 
-                tweets[user_id].append(row)
-                
-       
+                    if not row or not row.get("text"):
+                        continue
+
+                    row["in_reply_to_screen_name"] = 0
+
+                    tweets[user_id].append(row)
+
+        iteration = -self.sub_sample_size
         for user_id in users:  
             try:
                 user_tweets = tweets.get(user_id, [])   
@@ -114,5 +120,27 @@ class Cresci17(IterableDataset):
             yield Sample(
                     tweet_data=processed_tweets,
                     user_data=UserData.from_row(users[user_id]),
-                    label=str(self.subset_type.value),
+                    label= self.subset_type.value if self.custom_label is None else self.custom_label,
                     )
+            # count and stop early if only a sub sample is requested
+            if self.sub_sample_size > 0:
+                iteration += 1
+                if iteration >= 0: break
+        
+
+        
+
+        
+   
+    
+
+
+
+        
+
+
+
+   
+
+    
+    

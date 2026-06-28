@@ -13,18 +13,21 @@ class Twibot20(IterableDataset):
     """
     Dataset for the Twibot-20. The downloaded *.json files or a directory containing them,named "Twibot20", need to be in the directory /datasets.
     """
-    def __init__(self, mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None):
+    def __init__(self, mode :str, train_split: float = 0.8, dev_split: float = 0.1, root : str |None = None, label_mapping = ["bot","human"], sub_sample_size = -1):
         """
         :param root(OPTIONAL): the filepath of the dataset directory in which the dataset is stored, if none is given "datasets"
         :param mode: Dataset split to use ("train", "dev", or "test").
         :param train_split: Fraction of users assigned to the training set (e.g. 0.8 = 80%).
         :param dev_split: Fraction of users assigned to the validation set (e.g. 0.1 = 10)
-
+        :param label_mapping: List of labels to use for provided samples. Format: `['bot', 'human', 'unlabelled']`
+        :param sub_sample_size: (Default: -1) the upper limit of the amount samples the iterator should provide. Fewer samples are possible if the dataset doesn't have enough samples.
         """
         if root is None:
             root = "datasets"
 
+        self.sub_sample_size = sub_sample_size
         self.mode = mode
+        self.label_mapping = label_mapping
 
         assert train_split + dev_split < 1.0
 
@@ -74,6 +77,7 @@ class Twibot20(IterableDataset):
         
 
     def __iter__(self):
+        iteration = -self.sub_sample_size
         for path in self.files:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -100,9 +104,9 @@ class Twibot20(IterableDataset):
                     #creates the bot_label
                     bot_label = row.get("label")
                     if bot_label == "1":
-                        bot_label = "bot"
+                        bot_label = self.label_mapping[0]
                     elif bot_label == "0":
-                        bot_label = "human"
+                        bot_label = self.label_mapping[1]
                     else:
                         continue
 
@@ -125,8 +129,12 @@ class Twibot20(IterableDataset):
                         yield Sample(
                                 tweet_data=current_tweets,
                                 user_data=old_user,
-                                label=str(previous_label),
+                                label=previous_label,
                             )
+                        # count and stop early if only a sub sample is requested
+                        if self.sub_sample_size > 0:
+                            iteration += 1
+                            if iteration >= 0: break
 
                         current_tweets = []
                         current_user_id = user_id
@@ -164,8 +172,12 @@ class Twibot20(IterableDataset):
                     yield Sample(
                         tweet_data=current_tweets,
                         user_data=old_user,
-                        label=str(previous_label),
+                        label=previous_label,
                     )
+                    # count and stop early if only a sub sample is requested
+                    if self.sub_sample_size > 0:
+                        iteration += 1
+                        if iteration >= 0: break
 
                     
 
