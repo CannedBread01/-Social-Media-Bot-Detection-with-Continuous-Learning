@@ -1,3 +1,4 @@
+import copy
 import math
 import re
 
@@ -66,6 +67,51 @@ def create_tweet_vectors(tweet_data, tokenizer, model, batch_size = math.inf, ma
     return torch.atleast_2d(final_embeddings).detach().cpu()
 
 
+class EarlyStopper:
+    """
+    Tracks the progress the model makes during training and terminates early if no progress is made.
+    Additionally the current best performing model weights are stored, so that they can be retrieved.
+    """
+    def __init__(self, patience: int = 3):
+        """
+        :param patience: determines how long the Stopper should tolerate worsening performance before triggering
+        """
+        self.patience = patience
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.best_model_weights = None
+        self.early_stop = False
+
+    def evaluate_step(self, current_loss, model):
+        """
+        Performs one step in the evaluation of the model
+        :param current_loss: the current loss value associated with the passed model
+        :param model: the model that is being evalauted
+        """
+        if current_loss < self.best_loss: # reset patience and store best model
+            self.best_loss = current_loss
+            self.counter = 0
+            self.best_model_weights = copy.deepcopy(model.state_dict())
+        else: # increase patience counter
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+
+    def load_best_model(self, model):
+        """
+        Loads the best model weights achieved during training into the provided model
+        :param model: the model that was being evalauted
+        :return: returns the model with the best weights achived during training. model remains unchanged if no weights were stored yet
+        """
+
+        if self.best_model_weights is not None:
+            model.load_state_dict(self.best_model_weights)
+            print(f"Loaded best model weights (Best Loss: {self.best_loss:.4f})")
+        else:
+            print("No weights have been saved yet!")
+        return model
+
 def train_classifier(classifier, criterion, optimizer ,input_samples, ground_truth_labels, epochs = 15, device = 'cuda' if torch.cuda.is_available() else 'cpu'):
     classifier.train()
     # create dataset from ground_truths and embedding features for batch processing
@@ -74,6 +120,9 @@ def train_classifier(classifier, criterion, optimizer ,input_samples, ground_tru
     dataset = TensorDataset(input_tensors, ground_truth_tensors)
     train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
+    # setup early stopper
+    early_stopper = EarlyStopper(patience=3)
+    # training loop
     for epoch in range(epochs):
         classifier.train()
         running_loss = 0.0
@@ -103,7 +152,14 @@ def train_classifier(classifier, criterion, optimizer ,input_samples, ground_tru
 
         # Calculate average loss across the entire epoch
         epoch_loss = running_loss / len(input_samples)
+        # check performance with early stopper
+        early_stopper.evaluate_step(epoch_loss, classifier)
         print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {epoch_loss:.4f}")
+        if early_stopper.early_stop:
+            print("-- stopping early --")
+            break
+    # get best model weights from training
+    classifier = early_stopper.load_best_model(classifier)
     return ground_truths, predictions
 
 def test_classifier(classifier, input_samples, ground_truth_labels, device = 'cuda' if torch.cuda.is_available() else 'cpu'):
@@ -148,6 +204,9 @@ def multi_svm_training_loop(classifier, replay_buffer, input_samples, ground_tru
     dataset = TensorDataset(input_tensors, ground_truth_tensors)
     train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+    # setup early stopper
+    early_stopper = EarlyStopper(patience=3)
+    # training loop
     for epoch in range(epochs):
         classifier.train()
         running_loss = 0.0
@@ -193,7 +252,14 @@ def multi_svm_training_loop(classifier, replay_buffer, input_samples, ground_tru
 
         # Calculate average loss across the entire epoch
         epoch_loss = running_loss / len(input_samples)
+        # check performance with early stopper
+        early_stopper.evaluate_step(epoch_loss, classifier)
         print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {epoch_loss:.4f}")
+        if early_stopper.early_stop:
+            print("-- stopping early --")
+            break
+    # get best model weights from training
+    classifier = early_stopper.load_best_model(classifier)
     return ground_truths, predictions
 
 def confidence_classifier_training_loop(classifier, criterion, optimizer ,input_samples, ground_truth_labels, epochs = 15, bot_label = 0, batch_size = 128, device = 'cuda' if torch.cuda.is_available() else 'cpu'):
@@ -206,6 +272,9 @@ def confidence_classifier_training_loop(classifier, criterion, optimizer ,input_
 
     inconfident_samples_buffer = []
 
+    # setup early stopper
+    early_stopper = EarlyStopper(patience=3)
+    # training loop
     for epoch in range(epochs):
         classifier.train()
         running_loss = 0.0
@@ -253,5 +322,12 @@ def confidence_classifier_training_loop(classifier, criterion, optimizer ,input_
 
         # Calculate average loss across the entire epoch
         epoch_loss = running_loss / len(input_samples)
+        # check performance with early stopper
+        early_stopper.evaluate_step(epoch_loss, classifier)
         print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {epoch_loss:.4f}")
+        if early_stopper.early_stop:
+            print("-- stopping early --")
+            break
+    # get best model weights from training
+    classifier = early_stopper.load_best_model(classifier)
     return ground_truths, predictions
