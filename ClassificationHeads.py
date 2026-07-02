@@ -20,6 +20,12 @@ class BaselineClassificationHead(nn.Module):
         x = self.classifier(x)
         return x
 
+    def expand_classifier(self, num_to_add=1):
+        """
+        does nothing,as it functions as a dummy, in order to keep the interface consistent.
+        """
+        return
+
 
 
 class ProgressiveNeuralNetworkClassifier(nn.Module):
@@ -229,3 +235,9 @@ class ConfidenceClassifier(nn.Module):
         x = self.relu(x)
         x = self.classifier(x)
         return x, self.softmax(x), self.softmax(x) > self.confidence_threshold # logits and probabilities
+
+    def expand_classifier(self, num_to_add=1):
+        """
+        does nothing,as it functions as a dummy, in order to keep the interface consistent.
+        """
+        return
