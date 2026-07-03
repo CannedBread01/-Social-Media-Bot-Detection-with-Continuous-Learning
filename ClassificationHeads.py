@@ -27,6 +27,28 @@ class BaselineClassificationHead(nn.Module):
         return
 
 
+class ProgressiveBlock(nn.Module):
+    def __init__(self, input_dim, output_dim, prev_hidden_dims):
+        super().__init__()
+
+        self.hidden_dim = max(output_dim, input_dim // 2)
+        self.layer1 = nn.Linear(input_dim, self.hidden_dim)
+        self.relu = nn.ReLU()
+
+        # the final layer takes its own previous layer as an input and the previous ones from the previous classes
+        total_hidden_dim = self.hidden_dim + sum(prev_hidden_dims)
+        self.layer2 = nn.Linear(total_hidden_dim, output_dim)
+
+    def forward(self, x, prev_hiddens):
+        x = self.layer1(x)
+        h = self.relu(x)
+
+        # Concatenate previous hidden states with the current one
+        if prev_hiddens: combined_h = torch.cat(prev_hiddens + [h], dim=-1)
+        else: combined_h = h
+
+        out = self.layer2(combined_h)
+        return out, h
 
 class ProgressiveNeuralNetworkClassifier(nn.Module):
     """
@@ -42,19 +64,23 @@ class ProgressiveNeuralNetworkClassifier(nn.Module):
 
         self.dropout = nn.Dropout(p=dropout_p)
         # contains all output layers for classification
-        self.classificationLayers = nn.ModuleList([
-            nn.Linear(in_features=in_features, out_features=output_dim)
-        ])
+        self.blocks = nn.ModuleList([])
+        self.hidden_dims = []
+        self.expand_classifier(output_dim)
 
     def forward(self, x):
         # set the device once
         if self.device is None: self.device = x.device
 
         x = self.dropout(x)
-        # pass through all classification layers in parallel
-        outputs = list(map(lambda layer: layer(x), self.classificationLayers))
-        outputs = torch.cat(outputs, dim=-1) # concat outputs
-        return outputs
+        # pass through all layers in parallel
+        outputs = []
+        prev_hiddens = []
+        for block in self.blocks:
+            out, h = block(x, prev_hiddens)
+            outputs.append(out)
+            prev_hiddens.append(h)
+        return torch.cat(outputs, dim=-1)
 
     def expand_classifier(self, num_to_add = 1):
         """
@@ -65,13 +91,14 @@ class ProgressiveNeuralNetworkClassifier(nn.Module):
         :return: the new relevant parameters of the model to optimize
         """
         # disable optimization for old layers
-        for layer in self.classificationLayers:
+        for layer in self.blocks:
             for param in layer.parameters():
                 param.requires_grad = False
-        # add new layer to list
-        new_layer = nn.Linear(self.in_features, num_to_add).to(device=self.device)
-        self.classificationLayers.append(new_layer)
-        return new_layer.parameters()
+        # add new block to list
+        new_layer = ProgressiveBlock(self.in_features,num_to_add, self.hidden_dims).to(device=self.device)
+        self.blocks.append(new_layer)
+        self.hidden_dims.append(new_layer.hidden_dim)
+        return self.parameters()
 
 
 
