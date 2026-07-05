@@ -58,8 +58,8 @@ class ContinualExperimentManager:
         self.baseline_accuracy = [ 
             0.379 , # Cresci17
             0.596, # Cresci18 
-            0.973 # Caverlee11
-            0.443 #Twi20
+            0.973, # Caverlee11
+            0.443, #Twi20
             0.860 # Twi22
         ]
 
@@ -295,7 +295,7 @@ class ContinualExperimentManager:
             print(f"  Step {snap['step']}: AA={snap['avg_accuracy']:.4f}, "
                   f"FM={snap['forgetting']:.4f}, "
                   f"Scores={[f'{x:.3f}' for x in snap['row']]}")
-            print(f"\nAverage Incremental Accuracy:", self.compute_average_incremental_accuracy)
+            print(f"\nAverage Incremental Accuracy:",     self.compute_average_incremental_accuracy())
 
 
         self.print_matrix()
