@@ -206,7 +206,7 @@ class Twibot22Improved(IterableDataset):
                 users[user_id] = row
                 user_count += 1
                 if user_count % 50000 == 0:
-                    print(f"\r--> Successfully cached {len(users)} users in memory.", end="", flush=True)
+                    print(f"--> Successfully cached {len(users)} users in memory.")
 
         # prepare access to database for tweets
         env = lmdb.open(self.tweet_database_path, max_dbs=1, readonly=True)
@@ -228,13 +228,13 @@ class Twibot22Improved(IterableDataset):
 
 
                     user_data = UserData.from_row(users.get(user_id))
-                    label = self.label_mapping.get(labels[user_id], "unknown"),
+                    label = self.label_mapping.get(labels[user_id], "unknown")
                     tweet_data = [TweetData.from_row({"text":tweet}) for tweet in tweets]
                     # yield sample
                     yield Sample(
                         tweet_data=tweet_data,
                         user_data=user_data,
-                        label=label,
+                        label=label
                     )
                     # count and stop early if only a sub sample is requested
                     if self.sub_sample_size > 0:
