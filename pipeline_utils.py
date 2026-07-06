@@ -47,12 +47,12 @@ def create_tweet_vectors(tweet_data, tokenizer, model, batch_size = math.inf, ma
     # process texts in batches
     raw_embeddings = []
     index = 0
+    # replace urls with 'url'
+    URL_PATTERN = r"https?://\S+|www\.\S+"
+    texts = [re.sub(URL_PATTERN, " url ", text) for text in texts]
     while index < min(tweet_count, max_tweets):
         # grab text batch
         text_batch = texts[index:min(index+batch_size, tweet_count)]
-        # replace urls with 'url'
-        URL_PATTERN = r"https?://\S+|www\.\S+"
-        text_batch = [re.sub(URL_PATTERN, " url ", text) for text in text_batch]
 
         # get textual embedding of the batch
         with torch.no_grad():
