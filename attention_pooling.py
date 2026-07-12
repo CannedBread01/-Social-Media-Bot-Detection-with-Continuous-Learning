@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import re
 
 class AttentionPooling(nn.Module):
 
@@ -41,3 +42,28 @@ class BotDetectionModel(nn.Module):
         combined = torch.cat([pooled_tweets, profile_vec], dim=1)
         logits = self.classifier(combined)
         return logits, attn_weights
+
+def create_tweet_vectors_attention(tweet_data, tokenizer, model, max_tweets=50, device='cuda'):
+    tweet_count = len(tweet_data)
+    embed_dim = 768
+
+    if tweet_count == 0:
+        return (torch.zeros(max_tweets, embed_dim),
+                torch.zeros(max_tweets, dtype=torch.bool))
+
+    texts = [t.text for t in tweet_data[:max_tweets]]
+    URL_PATTERN = r"https?://\S+|www\.\S+"
+    texts = [re.sub(URL_PATTERN, " url ", t) for t in texts]
+
+    with torch.no_grad():
+        tokenized = tokenizer(texts, padding="longest", truncation=True, return_tensors="pt").to(device)
+        output = model(**tokenized)
+    embeds = output.last_hidden_state[:, 0, :].detach().cpu()
+
+    n = embeds.shape[0]
+    padded = torch.zeros(max_tweets, embed_dim)
+    mask = torch.zeros(max_tweets, dtype=torch.bool)
+    padded[:n] = embeds
+    mask[:n] = True
+
+    return padded, mask
