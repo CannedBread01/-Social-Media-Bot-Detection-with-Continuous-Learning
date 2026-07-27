@@ -24,7 +24,7 @@ class BaselineClassificationHead(nn.Module):
         """
         does nothing,as it functions as a dummy, in order to keep the interface consistent.
         """
-        return
+        return self.parameters()
 
 
 class ProgressiveBlock(nn.Module):
@@ -267,4 +267,4 @@ class ConfidenceClassifier(nn.Module):
         """
         does nothing,as it functions as a dummy, in order to keep the interface consistent.
         """
-        return
+        return self.parameters()
