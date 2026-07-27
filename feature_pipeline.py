@@ -2,6 +2,7 @@ from collections.abc import Callable, Iterable
 import math
 import re
 
+import joblib
 import numpy as np
 import torch
 import umap
@@ -330,3 +331,86 @@ class FeaturePipeline:
             reduced_features,
             dtype=np.float32,
         )
+
+class ProcessedFeaturePipeline:
+    """
+    Shared stage before any classifier.
+
+    Dataset Sample
+        -> profile metadata + frozen DistilBERT tweet embedding
+        -> RobustScaler
+        -> UMAP
+        -> classifier-ready feature vectors
+    """
+
+    def __init__(self, config: dict, device: torch.device, umap_path = "./datasets/ProcessedDatasets/"):
+        self.device = device
+
+        self.max_tweets_per_user = config.get("max_tweets_per_user",20)
+        self.tweet_batch_size = config.get("tweet_batch_size",32)
+        self.max_token_length = config.get("max_token_length",128)
+        self.random_seed = config.get("random_seed",42)
+
+        model_name = config.get("embedding_model","distilbert-base-uncased")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.bert_model = AutoModel.from_pretrained(model_name).to(self.device)
+        self.bert_model.eval()
+
+        for parameter in self.bert_model.parameters():
+            parameter.requires_grad_(False)
+
+        self.scaler = RobustScaler(with_centering=False)
+
+        self.dim_reducer = joblib.load(f"{umap_path}UmapModel.joblib")
+
+        self.is_fitted = True
+
+    def embed_split(
+        self,
+        dataset: Iterable,
+        task_name: str,
+        label_transform: Callable[[str], str],
+        max_samples: int | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        """
+        Converts a dataset split into raw feature vectors and string labels.
+
+        Does NOT scale, reduce, train, replay, or evaluate.
+        """
+
+        features = []
+        labels = []
+
+        print(f"Embedding '{task_name}'...")
+        for index, sample in enumerate(dataset):
+            features.append(sample[0])
+            labels.append(sample[1].item())
+
+        if not features:
+            feature_dim = (8 + self.bert_model.config.hidden_size)
+            return (np.empty((0, feature_dim),dtype=np.float32),[])
+
+        result = np.stack(features).astype(np.float32)
+
+        print(f"Finished '{task_name}': {result.shape}, labels={sorted(set(labels))}")
+
+        return result, labels
+
+    def fit_transform_first_task(self,raw_features: np.ndarray,) -> np.ndarray:
+        """
+        Fit RobustScaler and UMAP on Task 0 only.
+        Here: functions only as a pass through.
+        """
+        # TODO: not relevant
+        if len(raw_features) == 0:
+            raise ValueError("Cannot fit feature pipeline on an empty task.")
+
+        return np.asarray(raw_features,dtype=np.float32)
+
+    def transform(self,raw_features: np.ndarray,) -> np.ndarray:
+        """
+        Transform all later tasks using Task 0's fitted scaler and UMAP.
+        Here: functions only as a pass through.
+        """
+
+        return np.asarray(raw_features,dtype=np.float32)

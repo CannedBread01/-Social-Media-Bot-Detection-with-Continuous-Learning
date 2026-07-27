@@ -7,8 +7,9 @@ from torch import nn
 import hdbscan
 
 from label_remapper import LabelRemapper
-from ClassificationHeads import ProgressiveNeuralNetworkClassifier
-from pipeline_utils import train_classifier
+from ClassificationHeads import ProgressiveNeuralNetworkClassifier, BaselineClassificationHead, ConfidenceClassifier, \
+    OneAgainstRestSVM, ReplayBuffer
+from pipeline_utils import train_classifier, multi_svm_training_loop, confidence_classifier_training_loop
 
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -1175,3 +1176,598 @@ class MulticlassTransformerStrategy:
             state["index_to_label"][index]
             for index in predicted_indices
         ]
+
+
+# -------------------
+class BaselineClassifierStrategy:
+    """
+    """
+
+    def initialize(self, feature_dim: int, config: dict, device: torch.device) -> dict:
+        return {
+            "feature_dim": feature_dim,
+            "device": device,
+            "config": config,
+            "classifier": None,
+            "criterion": nn.CrossEntropyLoss(),
+            "label_remapper": LabelRemapper(),
+            "known_native_labels": set(),
+            "index_to_label": {},
+            "replay_by_label": {},
+        }
+
+    def train_stage(self, state: dict, stage: dict) -> tuple[dict, dict]:
+        task_index = stage["task_index"]
+        task_name = stage["task_name"]
+
+        X_train = stage["X_train"]
+        y_train = [str(label) for label in stage["y_train"]]
+
+        config = state["config"]
+        device = state["device"]
+
+        current_labels = set(y_train)
+
+        new_labels = sorted(current_labels - state["known_native_labels"])
+
+        print("Current labels:", sorted(current_labels))
+        print("Unseen labels:", new_labels)
+
+        replay_features, _ = replay_to_arrays(
+            replay_by_label=state["replay_by_label"],
+            feature_dim=state["feature_dim"],
+        )
+
+        if task_index == 0:
+            detected_new_cluster = False
+        else:
+            detected_new_cluster = (
+                detect_current_dominated_cluster(
+                    reference_features=replay_features,
+                    current_features=X_train,
+                    min_cluster_size=config["hdbscan_min_cluster_size"],
+                    current_fraction_threshold=config["hdbscan_current_fraction"],
+                )
+            )
+
+        print("HDBSCAN novelty signal:", detected_new_cluster)
+
+        classifier = state["classifier"]
+        label_remapper = state["label_remapper"]
+
+        if task_index == 0:
+            if len(new_labels) < 2:
+                raise RuntimeError("Task 0 must contain at least two classes.")
+
+            for label in new_labels:
+                label_remapper.register(label)
+                label_index = label_remapper.convert([label])[0]
+                state["index_to_label"][label_index] = label
+
+            state["known_native_labels"].update(new_labels)
+
+            base_classifier = BaselineClassificationHead(embedding_dim=state["feature_dim"], output_dim=8, dropout_prob=config.get("dropout_p", 0.1))
+            classifier = base_classifier.to(device=device)
+
+            trainable_parameters = list(
+                classifier.parameters()
+            )
+
+            print(f"Created classifier with {len(new_labels)} outputs.")
+
+        else:
+            use_override = config.get("use_intervention_override",True)
+
+            should_expand = (
+                len(new_labels) > 0
+                if use_override
+                else detected_new_cluster
+            )
+
+            if new_labels and not should_expand:
+                raise RuntimeError(
+                    "New labels exist, but the novelty "
+                    "detector did not request expansion."
+                )
+
+            if should_expand and new_labels:
+                for label in new_labels:
+                    label_remapper.register(label)
+
+                    label_index = label_remapper.convert([label])[0]
+                    state["index_to_label"][label_index] = label
+
+                state["known_native_labels"].update(new_labels)
+
+                trainable_parameters = list(
+                    classifier.expand_classifier(num_to_add=len(new_labels))
+                )
+
+                print(f"Expanded classifier by {len(new_labels)} output(s): {new_labels}")
+
+            else:
+                trainable_parameters = [parameter for parameter in classifier.parameters() if
+                                        parameter.requires_grad]
+
+        classifier.eval()
+
+        with torch.inference_mode():
+            probe_count = min(2, len(X_train))
+
+            probe = torch.tensor(X_train[:probe_count], dtype=torch.float32, device=device)
+
+            actual_output_count = classifier(probe).shape[1]
+
+        expected_output_count = len(state["known_native_labels"])
+
+
+        print("Actual classifier outputs:", actual_output_count, )
+
+        train_features, train_native_labels = (
+            create_balanced_training_set(
+                current_features=X_train,
+                current_labels=y_train,
+                replay_by_label=state["replay_by_label"],
+                samples_per_class=config[
+                    "balanced_samples_per_class"
+                ],
+                random_seed=config["random_seed"],
+            )
+        )
+
+        print("Balanced classifier-training counts:")
+
+        for label in sorted(set(train_native_labels)):
+            print(f"  {label}: ", f"{train_native_labels.count(label)}")
+
+        train_targets = label_remapper.convert(train_native_labels)
+
+        optimizer = torch.optim.Adam(trainable_parameters, lr=config["learning_rate"], )
+
+        classifier.train()
+
+        train_classifier(
+            classifier,
+            state["criterion"],
+            optimizer,
+            train_features,
+            train_targets,
+            epochs=config["epochs"],
+            device=device,
+        )
+
+        update_replay(
+            replay_by_label=state["replay_by_label"],
+            features=X_train,
+            labels=y_train,
+            replay_per_class=config["replay_per_class"],
+            random_seed=config["random_seed"],
+        )
+
+        state["classifier"] = classifier
+
+        train_info = {
+            "task_name": task_name,
+            "new_labels": new_labels,
+            "hdbscan_detected_new_cluster": (detected_new_cluster),
+            "total_classes": expected_output_count,
+        }
+
+        return state, train_info
+
+    def predict_labels(self, state: dict, features: np.ndarray, evaluation_context: dict, ) -> list[str]:
+        classifier = state["classifier"]
+        device = state["device"]
+
+        classifier.eval()
+
+        batch_size = state["config"].get("eval_batch_size", 256)
+
+        predicted_indices = []
+
+        with torch.inference_mode():
+            for start in range(0, len(features), batch_size):
+                batch_features = torch.tensor(features[start:start + batch_size], dtype=torch.float32,device=device)
+
+                logits = classifier(batch_features)
+
+                predicted_indices.extend(logits.argmax(dim=1).cpu().tolist())
+
+        return [state["index_to_label"][index] for index in predicted_indices]
+
+class MultiClassConfidenceClassifierStrategy:
+    """
+    """
+
+    def initialize(self, feature_dim: int, config: dict, device: torch.device) -> dict:
+        return {
+            "feature_dim": feature_dim,
+            "device": device,
+            "config": config,
+            "classifier": None,
+            "criterion": nn.CrossEntropyLoss(),
+            "label_remapper": LabelRemapper(),
+            "known_native_labels": set(),
+            "index_to_label": {},
+            "replay_by_label": {},
+        }
+
+    def train_stage(self, state: dict, stage: dict) -> tuple[dict, dict]:
+        task_index = stage["task_index"]
+        task_name = stage["task_name"]
+
+        X_train = stage["X_train"]
+        y_train = [str(label) for label in stage["y_train"]]
+
+        config = state["config"]
+        device = state["device"]
+
+        current_labels = set(y_train)
+
+        new_labels = sorted(current_labels - state["known_native_labels"])
+
+        print("Current labels:", sorted(current_labels))
+        print("Unseen labels:", new_labels)
+
+        replay_features, _ = replay_to_arrays(
+            replay_by_label=state["replay_by_label"],
+            feature_dim=state["feature_dim"],
+        )
+
+        if task_index == 0:
+            detected_new_cluster = False
+        else:
+            detected_new_cluster = (
+                detect_current_dominated_cluster(
+                    reference_features=replay_features,
+                    current_features=X_train,
+                    min_cluster_size=config["hdbscan_min_cluster_size"],
+                    current_fraction_threshold=config["hdbscan_current_fraction"],
+                )
+            )
+
+        print("HDBSCAN novelty signal:", detected_new_cluster)
+
+        classifier = state["classifier"]
+        label_remapper = state["label_remapper"]
+
+        if task_index == 0:
+            if len(new_labels) < 2:
+                raise RuntimeError("Task 0 must contain at least two classes.")
+
+            for label in new_labels:
+                label_remapper.register(label)
+                label_index = label_remapper.convert([label])[0]
+                state["index_to_label"][label_index] = label
+
+            state["known_native_labels"].update(new_labels)
+
+            base_classifier = ConfidenceClassifier(embedding_dim=state["feature_dim"], output_dim=len(new_labels), dropout_prob=config.get("dropout_p", 0.1))
+            classifier = base_classifier.to(device=device)
+
+            trainable_parameters = list(
+                classifier.parameters()
+            )
+
+            print(f"Created classifier with {len(new_labels)} outputs.")
+
+        else:
+            use_override = config.get("use_intervention_override",True)
+
+            should_expand = (
+                len(new_labels) > 0
+                if use_override
+                else detected_new_cluster
+            )
+
+            if new_labels and not should_expand:
+                raise RuntimeError(
+                    "New labels exist, but the novelty "
+                    "detector did not request expansion."
+                )
+
+            if should_expand and new_labels:
+                for label in new_labels:
+                    label_remapper.register(label)
+
+                    label_index = label_remapper.convert([label])[0]
+                    state["index_to_label"][label_index] = label
+
+                state["known_native_labels"].update(new_labels)
+
+                trainable_parameters = list(
+                    classifier.expand_classifier(num_to_add=len(new_labels))
+                )
+
+                print(f"Expanded classifier by {len(new_labels)} output(s): {new_labels}")
+
+            else:
+                trainable_parameters = [parameter for parameter in classifier.parameters() if
+                                        parameter.requires_grad]
+
+        classifier.eval()
+
+        with torch.inference_mode():
+            probe_count = min(2, len(X_train))
+
+            probe = torch.tensor(X_train[:probe_count], dtype=torch.float32, device=device)
+
+            actual_output_count, probabilities, isConfident = classifier(probe)
+            actual_output_count = actual_output_count.shape[1]
+
+        expected_output_count = len(state["known_native_labels"])
+
+
+        print("Actual classifier outputs:", actual_output_count, )
+
+        train_features, train_native_labels = (
+            create_balanced_training_set(
+                current_features=X_train,
+                current_labels=y_train,
+                replay_by_label=state["replay_by_label"],
+                samples_per_class=config[
+                    "balanced_samples_per_class"
+                ],
+                random_seed=config["random_seed"],
+            )
+        )
+
+        print("Balanced classifier-training counts:")
+
+        for label in sorted(set(train_native_labels)):
+            print(f"  {label}: ", f"{train_native_labels.count(label)}")
+
+        train_targets = label_remapper.convert(train_native_labels)
+
+        optimizer = torch.optim.Adam(trainable_parameters, lr=config["learning_rate"], )
+
+        classifier.train()
+
+        train_targets = [int(min(x,1.0)) for x in train_targets]
+        confidence_classifier_training_loop(classifier, state["criterion"], optimizer, train_features, train_targets,bot_label=1, device=device)
+        # train_classifier(
+        #     classifier,
+        #     state["criterion"],
+        #     optimizer,
+        #     train_features,
+        #     train_targets,
+        #     epochs=config["epochs"],
+        #     device=device,
+        # )
+
+        update_replay(
+            replay_by_label=state["replay_by_label"],
+            features=X_train,
+            labels=y_train,
+            replay_per_class=config["replay_per_class"],
+            random_seed=config["random_seed"],
+        )
+
+        state["classifier"] = classifier
+
+        train_info = {
+            "task_name": task_name,
+            "new_labels": new_labels,
+            "hdbscan_detected_new_cluster": (detected_new_cluster),
+            "total_classes": expected_output_count,
+        }
+
+        return state, train_info
+
+    def predict_labels(self, state: dict, features: np.ndarray, evaluation_context: dict, ) -> list[str]:
+        classifier = state["classifier"]
+        device = state["device"]
+
+        classifier.eval()
+
+        batch_size = state["config"].get("eval_batch_size", 256)
+
+        predicted_indices = []
+
+        with torch.inference_mode():
+            for start in range(0, len(features), batch_size):
+                batch_features = torch.tensor(features[start:start + batch_size], dtype=torch.float32,device=device)
+
+                logits, probabilities, confidence = classifier(batch_features)
+
+                predicted_indices.extend(logits.argmax(dim=1).cpu().tolist())
+
+        return [state["index_to_label"][index] for index in predicted_indices]
+
+class MultiSVMClassifierStrategy:
+    """
+    """
+
+    def initialize(self, feature_dim: int, config: dict, device: torch.device) -> dict:
+        return {
+            "feature_dim": feature_dim,
+            "device": device,
+            "config": config,
+            "classifier": None,
+            "criterion": nn.CrossEntropyLoss(),
+            "label_remapper": LabelRemapper(),
+            "known_native_labels": set(),
+            "index_to_label": {},
+            "replay_by_label": {},
+            "replay_buffer": ReplayBuffer(50,0)
+        }
+
+    def train_stage(self, state: dict, stage: dict) -> tuple[dict, dict]:
+        task_index = stage["task_index"]
+        task_name = stage["task_name"]
+
+        X_train = stage["X_train"]
+        y_train = [str(label) for label in stage["y_train"]]
+
+        config = state["config"]
+        device = state["device"]
+
+        current_labels = set(y_train)
+
+        new_labels = sorted(current_labels - state["known_native_labels"])
+
+        print("Current labels:", sorted(current_labels))
+        print("Unseen labels:", new_labels)
+
+        replay_features, _ = replay_to_arrays(
+            replay_by_label=state["replay_by_label"],
+            feature_dim=state["feature_dim"],
+        )
+
+        if task_index == 0:
+            detected_new_cluster = False
+        else:
+            detected_new_cluster = (
+                detect_current_dominated_cluster(
+                    reference_features=replay_features,
+                    current_features=X_train,
+                    min_cluster_size=config["hdbscan_min_cluster_size"],
+                    current_fraction_threshold=config["hdbscan_current_fraction"],
+                )
+            )
+
+        print("HDBSCAN novelty signal:", detected_new_cluster)
+
+        classifier = state["classifier"]
+        label_remapper = state["label_remapper"]
+
+        if task_index == 0:
+            if len(new_labels) < 2:
+                raise RuntimeError("Task 0 must contain at least two classes.")
+
+            for label in new_labels:
+                label_remapper.register(label)
+                label_index = label_remapper.convert([label])[0]
+                state["index_to_label"][label_index] = label
+
+            state["known_native_labels"].update(new_labels)
+
+            base_classifier = OneAgainstRestSVM(in_features=state["feature_dim"], output_dim=len(new_labels))
+            classifier = base_classifier.to(device=device)
+
+            trainable_parameters = list(
+                classifier.parameters()
+            )
+
+            print(f"Created classifier with {len(new_labels)} outputs.")
+
+        else:
+            use_override = config.get("use_intervention_override", True)
+
+            should_expand = (
+                len(new_labels) > 0
+                if use_override
+                else detected_new_cluster
+            )
+
+            if new_labels and not should_expand:
+                raise RuntimeError(
+                    "New labels exist, but the novelty "
+                    "detector did not request expansion."
+                )
+
+            if should_expand and new_labels:
+                for label in new_labels:
+                    label_remapper.register(label)
+
+                    label_index = label_remapper.convert([label])[0]
+                    state["index_to_label"][label_index] = label
+
+                state["known_native_labels"].update(new_labels)
+
+                trainable_parameters = list(
+                    classifier.expand_classifier(num_to_add=len(new_labels))
+                )
+
+                print(f"Expanded classifier by {len(new_labels)} output(s): {new_labels}")
+
+            else:
+                trainable_parameters = [parameter for parameter in classifier.parameters() if
+                                        parameter.requires_grad]
+
+        classifier.eval()
+
+        with torch.inference_mode():
+            probe_count = min(2, len(X_train))
+
+            probe = torch.tensor(X_train[:probe_count], dtype=torch.float32, device=device)
+
+            actual_output_count = classifier(probe).shape[1]
+
+        expected_output_count = len(state["known_native_labels"])
+
+        print("Actual classifier outputs:", actual_output_count, )
+
+        train_features, train_native_labels = (
+            create_balanced_training_set(
+                current_features=X_train,
+                current_labels=y_train,
+                replay_by_label=state["replay_by_label"],
+                samples_per_class=config[
+                    "balanced_samples_per_class"
+                ],
+                random_seed=config["random_seed"],
+            )
+        )
+
+        print("Balanced classifier-training counts:")
+
+        for label in sorted(set(train_native_labels)):
+            print(f"  {label}: ", f"{train_native_labels.count(label)}")
+
+        train_targets = label_remapper.convert(train_native_labels)
+
+        optimizer = torch.optim.Adam(trainable_parameters, lr=config["learning_rate"], )
+
+        classifier.train()
+
+        multi_svm_training_loop(classifier, state["replay_buffer"], train_features, train_targets, epochs=config["epochs"], device=device)
+        # train_classifier(
+        #     classifier,
+        #     state["criterion"],
+        #     optimizer,
+        #     train_features,
+        #     train_targets,
+        #     epochs=config["epochs"],
+        #     device=device,
+        # )
+
+        update_replay(
+            replay_by_label=state["replay_by_label"],
+            features=X_train,
+            labels=y_train,
+            replay_per_class=config["replay_per_class"],
+            random_seed=config["random_seed"],
+        )
+
+        state["classifier"] = classifier
+
+        train_info = {
+            "task_name": task_name,
+            "new_labels": new_labels,
+            "hdbscan_detected_new_cluster": (detected_new_cluster),
+            "total_classes": expected_output_count,
+        }
+
+        return state, train_info
+
+    def predict_labels(self, state: dict, features: np.ndarray, evaluation_context: dict, ) -> list[str]:
+        classifier = state["classifier"]
+        device = state["device"]
+
+        classifier.eval()
+
+        batch_size = state["config"].get("eval_batch_size", 256)
+
+        predicted_indices = []
+
+        with torch.inference_mode():
+            for start in range(0, len(features), batch_size):
+                batch_features = torch.tensor(features[start:start + batch_size], dtype=torch.float32,
+                                              device=device)
+
+                logits = classifier(batch_features)
+
+                predicted_indices.extend(logits.argmax(dim=1).cpu().tolist())
+
+        return [state["index_to_label"][index] for index in predicted_indices]
