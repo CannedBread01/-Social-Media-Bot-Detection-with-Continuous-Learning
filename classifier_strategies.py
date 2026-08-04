@@ -1181,20 +1181,12 @@ class MultiSVMClassifierStrategy:
 
         train_targets = label_remapper.convert(train_native_labels)
 
-        optimizer = torch.optim.Adam(trainable_parameters, lr=config["learning_rate"], )
+
 
         classifier.train()
 
         multi_svm_training_loop(classifier, state["replay_buffer"], train_features, train_targets, epochs=config["epochs"], device=device)
-        # train_classifier(
-        #     classifier,
-        #     state["criterion"],
-        #     optimizer,
-        #     train_features,
-        #     train_targets,
-        #     epochs=config["epochs"],
-        #     device=device,
-        # )
+
 
         update_replay(
             replay_by_label=state["replay_by_label"],

@@ -384,7 +384,7 @@ class ProcessedFeaturePipeline:
         print(f"Embedding '{task_name}'...")
         for index, sample in enumerate(dataset):
             features.append(sample[0])
-            labels.append(sample[1].item())
+            labels.append(sample[1])
 
         if not features:
             feature_dim = (8 + self.bert_model.config.hidden_size)
@@ -401,7 +401,6 @@ class ProcessedFeaturePipeline:
         Fit RobustScaler and UMAP on Task 0 only.
         Here: functions only as a pass through.
         """
-        # TODO: not relevant
         if len(raw_features) == 0:
             raise ValueError("Cannot fit feature pipeline on an empty task.")
 

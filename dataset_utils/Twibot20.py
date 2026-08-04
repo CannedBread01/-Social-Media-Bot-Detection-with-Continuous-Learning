@@ -19,7 +19,7 @@ class Twibot20(IterableDataset):
         :param mode: Dataset split to use ("train", "dev", or "test").
         :param train_split: Fraction of users assigned to the training set (e.g. 0.8 = 80%).
         :param dev_split: Fraction of users assigned to the validation set (e.g. 0.1 = 10)
-        :param label_mapping: List of labels to use for provided samples. Format: `['bot', 'human', 'unlabelled']`
+        :param label_mapping: List of labels to use for provided samples. Format: `['bot', 'human']`
         :param sub_sample_size: (Default: -1) the upper limit of the amount samples the iterator should provide. Fewer samples are possible if the dataset doesn't have enough samples.
         """
         if root is None:
