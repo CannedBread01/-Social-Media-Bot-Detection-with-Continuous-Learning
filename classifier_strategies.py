@@ -7,12 +7,9 @@ from torch import nn
 import hdbscan
 
 from label_remapper import LabelRemapper
-from ClassificationHeads import ProgressiveNeuralNetworkClassifier, BaselineClassificationHead, ConfidenceClassifier, \
+from pipeline_utils.ClassificationHeads import ProgressiveNeuralNetworkClassifier, BaselineClassificationHead, ConfidenceClassifier, \
     OneAgainstRestSVM, ReplayBuffer
-from pipeline_utils import train_classifier, multi_svm_training_loop, confidence_classifier_training_loop
-
-from torch.utils.data import DataLoader, TensorDataset
-
+from pipeline_utils.pipeline_utils import train_classifier, multi_svm_training_loop, confidence_classifier_training_loop
 
 
 class ClassifierStrategy(Protocol):
